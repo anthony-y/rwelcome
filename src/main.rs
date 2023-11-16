@@ -1,6 +1,7 @@
 mod weather;
 use std::fs;
 use std::env;
+use std::io::Write;
 use std::io::{self, Read, BufRead, BufReader};
 use colored::Colorize;
 use tokio;
@@ -23,8 +24,8 @@ fn acquire_todos(todos_path: String) -> io::Result<Vec<String>> {
     let reader = io::BufReader::new(file);
     let mut todos = Vec::<String>::new();
 
-    for line in reader.lines() {
-        let line = line?;
+    for maybe_line in reader.lines() {
+        let line = maybe_line?;
         if line.is_empty() || !line.starts_with('#') {
             break;
         }
@@ -175,22 +176,57 @@ fn edit_todos(wants_editor: bool, todos_path: String) -> Result<(), &'static str
         return Ok(());
     }
 
-    draw_line(12);
-
-    let current_todos = match acquire_todos(todos_path) {
+    let mut current_todos = match acquire_todos(todos_path) {
         Ok(todos) => todos,
         Err(err) => panic!("rwelcome: error: couldn't acquire todo list: {}", err),
     };
 
-    show_todos(current_todos);
+    println!(
+        "{}:\n  {}: # Todo text\n  {}: -1 (where 1 is the index of the todo to remove)\n  {}: {} or {} or {}",
+        "Usage".green(),
+        "Add a todo".bright_purple(),
+        "Remove a todo".bright_purple(),
+        "Exit".bright_purple(),
+        "!".bright_yellow(),
+        "quit".bright_yellow(),
+        "exit".bright_yellow()
+    );
 
-    loop {
+    draw_line(12);
+
+    let mut wants_menu = true;
+    while wants_menu {
+        show_todos(current_todos.clone());
+        print!("> ");
+        _ = io::stdout().flush();
         let mut selection = String::new();
         match io::stdin().read_line(&mut selection) {
-            Ok(_) => (),
+            Ok(read_length) => if read_length == 0 { wants_menu = false; },
             Err(_) => return Err("rwelcome: error: there was a problem reading your selection")
         }
+        selection = selection.to_lowercase();
+        if selection == "!"
+        || selection.contains("quit")
+        || selection.contains("exit") {
+            wants_menu = false;
+        } else if selection.starts_with("#") {
+            let start_offset = if selection.chars().nth(1).unwrap_or(0 as char) == ' ' { 2 } else { 1 };
+            current_todos.push(selection[start_offset..].to_string());
+        } else if selection.starts_with("-") {
+            let as_number = match selection.parse::<i32>() {
+                Ok(number) => number,
+                Err(err) => {
+                    println!("{}", err);
+                    return Err("rwelcome: info: to remove a todo item, type a '-' followed by it's list index, e.g.: '-2' removes the second todo list item.");
+                }
+            };
+            current_todos.remove(as_number as usize + 1);
+        } else {
+            return Err("rwelcome: info: usage: -[index] to remove, #[todo text] to add a new todo, '!'/'quit'/'exit' to leave the menu.");
+        }
     }
+
+    Ok(())
 }
 
 // Send _n_ hyphens to stdout, where _n_ equals `length`.
