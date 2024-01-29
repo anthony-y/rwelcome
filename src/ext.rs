@@ -188,7 +188,7 @@ pub async fn edit_todos(
         }
         let idx = args[3]
                 .parse::<i32>()
-                .expect("rwelcome error: please give a todo number to fix.")
+                .or_else(|_| io_err!("rwelcome error: please give a todo number to fix."))?
                 as usize;
         let content = args[4..].join(" ");
         if idx > current_todos.len() || idx < 1 {
