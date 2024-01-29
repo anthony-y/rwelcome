@@ -54,19 +54,11 @@ pub struct WeatherResponse {
     pub current: CurrentWeatherInfo,
 }
 
-pub async fn acquire() -> reqwest::Result<WeatherResponse> {
-    let key = env::var("RWELCOME_WEATHER_API_KEY")
-                     .expect("rwelcome: error: please bind an API key to the RWELCOME_WEATHER_API_KEY environment variable to display weather information.");
+pub async fn acquire(key: String) -> reqwest::Result<WeatherResponse> {
     let location = env::var("RWELCOME_WEATHER_LOCATION")
                           .unwrap_or_else(|_| "Brighton".to_string());
-
-    let url = format!(
-        "https://api.weatherapi.com/v1/current.json?key={}&q={}&aqi=no",
-        key,
-        location
-    );
+    let url = format!("https://api.weatherapi.com/v1/current.json?key={key}&q={location}&aqi=no");
     let res = reqwest::get(url).await?;
-
     let weather_res: WeatherResponse = res.json().await?;
     Ok(weather_res)
 }

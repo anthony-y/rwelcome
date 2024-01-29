@@ -1,8 +1,8 @@
 mod weather;
-use std::fs;
+
+use std::fs::{self, File};
 use std::env;
-use std::io::Write;
-use std::io::{self, Read, BufRead, BufReader};
+use std::io::{self, Write, Read, BufRead, BufReader};
 use colored::Colorize;
 use tokio;
 
@@ -18,26 +18,21 @@ fn show_todos(todos: Vec<String>) {
     }
 }
 
-/// Acquire todos from the filesystem at `TODOS_PATH`.
-fn acquire_todos(todos_path: String) -> io::Result<Vec<String>> {
+/// Acquire todos from the filesystem at `todos_path`.
+async fn acquire_todos(todos_path: String) -> io::Result<Vec<String>> {
     let file = fs::File::open(todos_path)?;
     let reader = io::BufReader::new(file);
     let mut todos = Vec::<String>::new();
-
     for maybe_line in reader.lines() {
         let line = maybe_line?;
-        if line.is_empty() || !line.starts_with('#') {
+        if line.is_empty() {
             break;
         }
-        if line.len() == 1 {
+        if line.starts_with('#') {
             continue;
         }
-        // We are basically just skipping the # (and space after it, if there is one.)
-        // If you add more than one space, that will not be excluded from the todo text.
-        let offset = if line.chars().nth(1).unwrap() == ' ' { 2 } else { 1 };
-        todos.push(line[offset..].to_string());
+        todos.push(line);
     }
-
     Ok(todos)
 }
 
@@ -60,9 +55,7 @@ fn acquire_hostname() -> std::io::Result<String> {
 fn acquire_cpu_temperature() -> io::Result<f64> {
     let path = env::var("RWELCOME_CPU_TEMP_PATH")
         .unwrap_or("/sys/class/hwmon/hwmon1/temp2_input".to_string());
-
     let contents = fs::read_to_string(path)?;
-
     let temp_millidegrees: i32 = contents
                                 .trim()
                                 .parse()
@@ -72,7 +65,6 @@ fn acquire_cpu_temperature() -> io::Result<f64> {
                                         "invalid temperature data"
                                     )
                                 })?;
-
     Ok(temp_millidegrees as f64 / 1000.0)
 }
 
@@ -95,17 +87,17 @@ fn acquire_uptime() -> io::Result<(u64, u64)> {
     let mut file       = fs::File::open("/proc/uptime")?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
-
     let uptime_str = contents.split_whitespace().next().ok_or(io::Error::new(
         io::ErrorKind::InvalidData,
         "invalid uptime data",
     ))?.trim();
-
-    let uptime_seconds = uptime_str.parse::<f32>().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let uptime_seconds = uptime_str.parse::<f32>()
+                        .map_err(|e|
+                            io::Error::new(io::ErrorKind::InvalidData, e)
+                        )?;
 
     let hours = uptime_seconds as u64 / 3600;
     let minutes = (uptime_seconds as u64 % 3600) / 60;
-
     Ok((hours, minutes))
 }
 
@@ -116,8 +108,7 @@ fn parse_memory_value(value: &str) -> io::Result<u64> {
         io::ErrorKind::InvalidData,
         "invalid memory data",
     ))?;
-    value
-        .parse()
+    value.parse()
         .map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -131,10 +122,8 @@ fn parse_memory_value(value: &str) -> io::Result<u64> {
 fn acquire_memory_info() -> io::Result<(u64, u64)> {
     let file = fs::File::open("/proc/meminfo")?;
     let reader = BufReader::new(file);
-
     let mut total_memory     = 0;
     let mut available_memory = 0;
-
     for line in reader.lines() {
         let line = line?;
         if let Some((key, value)) = line.split_once(':') {
@@ -145,91 +134,107 @@ fn acquire_memory_info() -> io::Result<(u64, u64)> {
             }
         }
     }
-
     let used_memory = total_memory - available_memory;
-
     Ok((used_memory, total_memory))
 }
 
 /// Displays an interface allowing the user to edit the todo list.
 /// If `wants_editor` is true, it will attempt to open an instance of
 /// an appropriate text editor with the todos file loaded.
-/// Otherwise, it will render an interactive TUI allowing the addition
-/// and removal of todo list items.
+/// Otherwise, it will attempt to parse action verbs supplied as additional arguments,
+/// e.g. rwelcome edit add Get bagels
+/// e.g. rwelcome edit done 2
 /// If anything goes wrong, it will return an Err containing an error
-/// message string that the caller can display to the user.
-fn edit_todos(wants_editor: bool, todos_path: String) -> Result<(), &'static str> {
+/// message string that the caller can output to the user.
+async fn edit_todos(
+    current_todos: &mut Vec<String>,
+    wants_editor: bool,
+    args: &mut Vec<String>,
+    todos_path: String
+) -> io::Result<Vec<String>> { 
 
     if wants_editor {
         let editor = env::var("EDITOR")
-                            .unwrap_or_else(|_| "vi".to_string());
-
+                        .unwrap_or_else(|_| "vi".to_string());
         let status = std::process::Command::new(editor)
-            .arg(todos_path)
+            .arg(todos_path.clone())
             .status()
             .expect("rwelcome: error: failed to execute editor");
-        
         if !status.success() {
-            return Err("rwelcome: error: editor exited with non-zero status code");
+            return Err(
+                io::Error::new(io::ErrorKind::Other, "rwelcome: error: editor exited with non-zero status code")
+            );
         }
-
-        return Ok(());
+        return acquire_todos(todos_path).await;
     }
 
-    let mut current_todos = match acquire_todos(todos_path) {
-        Ok(todos) => todos,
-        Err(err) => panic!("rwelcome: error: couldn't acquire todo list: {}", err),
-    };
+    assert!(args.len() > 2);
 
-    println!(
-        "{}:\n  {}: # Todo text\n  {}: -1 (where 1 is the index of the todo to remove)\n  {}: {} or {} or {}",
-        "Usage".green(),
-        "Add a todo".bright_purple(),
-        "Remove a todo".bright_purple(),
-        "Exit".bright_purple(),
-        "!".bright_yellow(),
-        "quit".bright_yellow(),
-        "exit".bright_yellow()
-    );
+    let verb = &args[2];
 
-    draw_line(12);
-
-    let mut wants_menu = true;
-    while wants_menu {
-        show_todos(current_todos.clone());
-        print!("> ");
-        _ = io::stdout().flush();
-        let mut selection = String::new();
-        match io::stdin().read_line(&mut selection) {
-            Ok(read_length) => if read_length == 0 { wants_menu = false; },
-            Err(_) => return Err("rwelcome: error: there was a problem reading your selection")
-        }
-        selection = selection.to_lowercase();
-        if selection == "!"
-        || selection.contains("quit")
-        || selection.contains("exit") {
-            wants_menu = false;
-        } else if selection.starts_with("#") {
-            let start_offset = if selection.chars().nth(1).unwrap_or(0 as char) == ' ' { 2 } else { 1 };
-            current_todos.push(selection[start_offset..].to_string());
-        } else if selection.starts_with("-") {
-            let as_number = match selection.parse::<i32>() {
-                Ok(number) => number,
-                Err(err) => {
-                    println!("{}", err);
-                    return Err("rwelcome: info: to remove a todo item, type a '-' followed by it's list index, e.g.: '-2' removes the second todo list item.");
-                }
-            };
-            current_todos.remove(as_number as usize + 1);
-        } else {
-            return Err("rwelcome: info: usage: -[index] to remove, #[todo text] to add a new todo, '!'/'quit'/'exit' to leave the menu.");
+    if verb == "done" || verb == "check" {
+        let the_rest = args[3..].join(" ");
+        let targets: Vec<usize> = the_rest
+                                 .split(",")
+                                 .map(|s| {
+                                     s.parse::<i32>()
+                                      .expect("rwelcome: error: you should supply a number to mark as done.")
+                                      as usize
+                                 })
+                                .collect();
+        // Remove in reverse order to avoid element shifting,
+        // preserving validity of user's given indices.
+        for i in (0..targets.len()).rev() {
+            let idx = targets[i];
+            if idx > current_todos.len() || idx < 1 {
+                return Err(
+                    io::Error::new(io::ErrorKind::Other, "welcome: error: please choose a number that's in the list.")
+                );
+            }
+            current_todos.remove(idx-1);
         }
     }
 
-    Ok(())
+    else if verb == "fix" {
+        if args.len() < 3 {
+            return Err(
+                io::Error::new(io::ErrorKind::Other, "welcome: error: please choose a number that's in the list.")
+            );
+        }
+        let idx = args[3]
+                .parse::<i32>()
+                .expect("rwelcome error: please give a todo number to fix.")
+                as usize;
+        let content = args[4..].join(" ");
+        if idx > current_todos.len() || idx < 1 {
+            return Err(
+                io::Error::new(io::ErrorKind::Other, "welcome: error: please choose a number that's in the list.")
+            );
+        }
+        current_todos[idx-1] = content;
+    }
+
+    else if verb == "add" {
+        let the_rest = args[3..].join(" ");
+        current_todos.push(the_rest);
+    }
+
+    else {
+        return Err(
+            io::Error::new(io::ErrorKind::Other, format!("welcome: error: unknown verb '{verb}'."))
+        );
+    }
+
+    let mut data_file = File::create(todos_path.clone())
+                        .expect("rwelcome: error: couldn't create your todos file.");
+
+    data_file.write(current_todos.join("\n").as_bytes())
+            .expect("rwelcome: error: couldn't update your todos...");
+
+    Ok(current_todos.to_vec())
 }
 
-// Send _n_ hyphens to stdout, where _n_ equals `length`.
+// Send N hyphens to stdout, where N equals `length`.
 fn draw_line(length: usize) {
     let mut i = 0;
     loop {
@@ -242,46 +247,60 @@ fn draw_line(length: usize) {
     }
 }
 
+
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), String> {
 
-    // Make the request to the weather service at the beginning, so that
-    // it has time to get a response before we go to render everything.
-    // This should mean there's less of a pause when printing to the screen.
-    //
-    // (In theory, this could also be done when acquiring info from the filesystem,
-    // such as uptime and kernel version.)
-    //
+    let username = acquire_current_user().unwrap_or_else(|| "unknown".to_string());
 
-    let wants_weather = match env::var("RWELCOME_WEATHER") {
-        Ok(val) => val.parse::<bool>().unwrap_or(true),
-        Err(err) => if err == env::VarError::NotPresent { true } else { false },
+    let default_todos_path = format!("/home/{username}/.local/share/rwelcome/todos");
+    let todos_path = env::var("RWELCOME_TODOS_PATH").unwrap_or(default_todos_path);
+
+    /*
+     * If we have an API key, acquire weather from Open Weather API.
+     *
+     * Do this before everything else, so that it's ready by the time
+     * we go to render.
+     */
+    let maybe_weather_response = match env::var("RWELCOME_WEATHER_API_KEY") {
+        Ok(key) => Some(weather::acquire(key).await),
+        Err(_) => None,
     };
 
-    let maybe_weather_response = 
-        if wants_weather { Some(weather::acquire().await) }
-        else { None };
+    /*
+     * If the RWELCOME_TODOS environment variable is present,
+     * parse the todos file into memory for rendering later.
+     */
+    let mut todos = acquire_todos(todos_path.clone()).await; 
 
-    let todos_path = env::var("RWELCOME_TODOS_PATH")
-        .unwrap_or("/home/ant/.local/share/rwelcome/todos".to_string());
-
-    let args: Vec<String> = env::args().collect();
+    /*
+     * Handle arguments
+    */
+    let mut args: Vec<String> = env::args().collect();
     if args.len() > 1 {
         let given_arg = &args[1];
-        if given_arg == "edit" {
-            let wants_editor = args.len() > 2 && args[2] == "--editor";
-            match edit_todos(wants_editor, todos_path.clone()) {
-                Ok(_) => (),
-                Err(msg) => {
-                    eprintln!("{}", msg)
-                }
-            }
+        if given_arg != "edit" {
+            return Err(format!("rwelcome: error: {given_arg} is not a valid verb."));
         }
+        let mut the_todos = match todos {
+            Ok(todos) => todos,
+            Err(err) => panic!("{}", err),
+        };
+        let wants_editor = args.len() == 2;
+        todos = edit_todos(
+            &mut the_todos,
+            wants_editor,
+            &mut args,
+            todos_path
+        ).await; 
     }
+
+    /*
+     * Render
+    */
     println!();
-    let username = acquire_current_user().unwrap_or_else(|| "unknown".to_string());
     let hostname = acquire_hostname().unwrap_or_else(|_| "unknown".to_string());
-    println!("{}@{}", username.bright_red(), hostname);
+    println!("{}@{}", username.bright_purple(), hostname);
     draw_line(username.len() + hostname.len() + 1);
     match acquire_uptime() {
         Ok((hours, minutes)) => println!("{}: {}h {}m", "Uptime".bright_blue(), hours, minutes),
@@ -319,9 +338,10 @@ async fn main() {
             Err(err) => eprintln!("{}: {}", "Weather".red(), err),
         }
     }
-    match acquire_todos(todos_path) {
+    match todos {
         Ok(todos) => show_todos(todos),
-        Err(err) => eprintln!("{}: {}", "Todos".red(), err),
-    };
+        Err(err)  => eprintln!("{}: {}", "Todos".red(), err),
+    }
     println!();
+    Ok(())
 }
