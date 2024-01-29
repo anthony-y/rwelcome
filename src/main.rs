@@ -1,5 +1,5 @@
 mod weather;
-mod ext;
+mod environment;
 
 use std::env;
 use colored::Colorize;
@@ -15,8 +15,8 @@ struct Rwelcome {
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    let environment = load().await?;
-    render(environment);
+    let ctx = load().await?;
+    render(ctx);
     Ok(())
 }
 
@@ -46,7 +46,7 @@ fn draw_line(length: usize) {
 }
 
 async fn load() -> Result<Rwelcome, String> {
-    let username = ext::acquire_current_user().unwrap_or_else(|| "unknown".to_string());
+    let username = environment::acquire_current_user().unwrap_or_else(|| "unknown".to_string());
 
     let default_todos_path = format!("/home/{username}/.local/share/rwelcome/todos");
     let todos_path = env::var("RWELCOME_TODOS_PATH").unwrap_or(default_todos_path);
@@ -66,7 +66,7 @@ async fn load() -> Result<Rwelcome, String> {
      * If the RWELCOME_TODOS environment variable is present,
      * parse the todos file into memory for rendering later.
      */
-    let mut todos = ext::acquire_todos(todos_path.clone()).await;
+    let mut todos = environment::acquire_todos(todos_path.clone()).await;
 
     /*
      * Handle arguments
@@ -77,41 +77,40 @@ async fn load() -> Result<Rwelcome, String> {
         if given_arg != "edit" {
             return Err(format!("rwelcome: error: {given_arg} is not a valid verb."));
         }
-        let mut the_todos = match todos {
+        let mut current_todos = match todos {
             Ok(todos) => todos,
             Err(err) => return Err(format!("{}", err)),
         };
         let wants_editor = args.len() == 2;
-        todos = ext::edit_todos(
-            &mut the_todos,
+        todos = environment::edit_todos(
+            &mut current_todos,
             wants_editor,
             &mut args,
             todos_path.clone()
         ).await; 
     }
-
     Ok(Rwelcome{ username, maybe_weather_response, todos })
 }
 
 fn render(ctx: Rwelcome) {
     println!();
-    let hostname = ext::acquire_hostname().unwrap_or_else(|_| "unknown".to_string());
+    let hostname = environment::acquire_hostname().unwrap_or_else(|_| "unknown".to_string());
     println!("{}@{}", ctx.username.purple(), hostname);
     let line_length = ctx.username.len() + hostname.len() + 1;
     draw_line(line_length);
-    match ext::acquire_uptime() {
+    match environment::acquire_uptime() {
         Ok((hours, minutes)) => println!("{}: {}h {}m", "Uptime".bright_blue(), hours, minutes),
         Err(err) => eprintln!("{}: {}", "Uptime".red(), err)
     }
-    match ext::acquire_memory_info() {
+    match environment::acquire_memory_info() {
         Ok((used, total)) => println!("{}: {} MiB / {} MiB", "Memory".bright_blue(), used / 1000, total / 1000),
         Err(err) => eprintln!("{}: {}", "Memory".red(), err),
     }
-    match ext::acquire_kernel_version() {
+    match environment::acquire_kernel_version() {
         Ok(version) => println!("{}: Linux {}", "Kernel".bright_blue(), version),
         Err(err) => eprintln!("{}: {}", "Kernel".red(), err)
     }
-    match ext::acquire_cpu_temperature() {
+    match environment::acquire_cpu_temperature() {
         Ok(temp) => println!("{}: {:.1}°C", "CPU temp".bright_blue(), temp),
         Err(err) => eprintln!("{}: {}", "CPU temp".red(), err)
     }
@@ -124,6 +123,7 @@ fn render(ctx: Rwelcome) {
                 let the_condition = weather.current.condition.text.to_lowercase();
                 let emoji = if the_condition == "cloudy" { "☁️" }
                                 else if the_condition.contains("fog") { "☁️" }
+                                else if the_condition.contains("mist") { "☁️" }
                                 else if the_condition.contains("sunny") { "🌤️" }
                                 else if the_condition.contains("rain") { "🌧️" }
                                 else { "🌥️" };

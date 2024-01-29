@@ -88,7 +88,6 @@ pub fn acquire_uptime() -> io::Result<(u64, u64)> {
                         .map_err(|e|
                             io::Error::new(io::ErrorKind::InvalidData, e)
                         )?;
-
     let hours = uptime_seconds as u64 / 3600;
     let minutes = (uptime_seconds as u64 % 3600) / 60;
     Ok((hours, minutes))
@@ -147,7 +146,20 @@ pub async fn edit_todos(
 ) -> io::Result<Vec<String>> {
     if wants_editor {
         let editor = env::var("EDITOR")
-                        .unwrap_or_else(|_| "vi".to_string());
+                                .unwrap_or_else(|_| "vi".to_string());
+
+        print!("Open text editor ({editor})? (y/n)> ");
+        io::stdout().flush().expect("io::stdout.flush() failed...");
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                if !input.trim().to_lowercase().starts_with("y") {
+                    return Ok(current_todos.clone());
+                }
+            },
+            Err(err) => panic!("rwelcome: error: problem reading input: details: {}", err),
+        };
+
         let status = std::process::Command::new(editor)
             .arg(todos_path.clone())
             .status()
@@ -163,14 +175,18 @@ pub async fn edit_todos(
 
     if verb == "done" || verb == "check" {
         let the_rest = args[3..].join(" ");
-        let list_indices: Vec<usize> = the_rest
-                                 .split(",")
-                                 .map(|s| {
-                                    s.parse::<i32>()
-                                    .expect("rwelcome: error: you should supply a number to mark as done.")
-                                    as usize
-                                 })
+
+        let list_indices_or_err: Result<Vec<i32>, _> = the_rest
+                                .split(",")
+                                .map(|s| s.parse::<i32>())
                                 .collect();
+
+        if let Err(_) = list_indices_or_err {
+            return io_err!("you should supply a number to mark as done.");
+        }
+
+        let list_indices: Vec<usize> = list_indices_or_err.unwrap().iter().map(|int| *int as usize).collect();
+
         // Remove in reverse order to avoid element shifting,
         // preserving validity of user's given indices.
         for i in (0..list_indices.len()).rev() {
@@ -183,16 +199,16 @@ pub async fn edit_todos(
     }
 
     else if verb == "fix" {
-        if args.len() < 3 {
-            return io_err!("please choose a number that's in the list.");
+        if args.len() < 5 {
+            return io_err!("'fix' requires a todo list number, and the new todo text.");
         }
         let idx = args[3]
                 .parse::<i32>()
-                .or_else(|_| io_err!("rwelcome error: please give a todo number to fix."))?
+                .or_else(|_| io_err!("'fix' requires a todo list number, and the new todo text."))?
                 as usize;
         let content = args[4..].join(" ");
         if idx > current_todos.len() || idx < 1 {
-            return io_err!("please choose a number that's in the list.");
+            return io_err!("please choose a todo list number that's in the list.");
         }
         current_todos[idx-1] = content;
     }
@@ -203,7 +219,7 @@ pub async fn edit_todos(
     }
 
     else {
-        return io_err!("unknown verb '{verb}'.");
+        return io_err!(format!("unexpected verb '{verb}'."));
     }
 
     let mut data_file: File = File::create(todos_path.clone())
